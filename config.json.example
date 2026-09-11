@@ -1,0 +1,70 @@
+{
+  "token": "PASTE_BOT_TOKEN_HERE",
+  "db_path": "data/modbot.sqlite3",
+  "log_channel_id": 0,
+  "mute_role_id": 0,
+  "dm_target": true,
+  "default_reason": "Причина не указана",
+  "dry_run": false,
+  "reconnect_delays": [
+    5,
+    15,
+    30,
+    60,
+    120,
+    300
+  ],
+  "reconnect_attempts": 0,
+  "reconnect_reset_after": 300,
+  "keepalive": "auto",
+  "keepalive_port": 8080,
+  "drivers": {
+    "active": "discord_voice",
+    "discord_voice": {
+      "quarantine_role_id": 0
+    },
+    "rcon": {
+      "host": "127.0.0.1",
+      "port": 25575,
+      "password": "",
+      "timeout": 5,
+      "query_cmd": "list",
+      "mute_cmd": "tempmute {target} {duration} {reason}",
+      "mute_perm_cmd": "mute {target} {reason}",
+      "chat_mute_cmd": "",
+      "ban_cmd": "tempban {target} {duration} {reason}",
+      "ban_perm_cmd": "ban {target} {reason}",
+      "unmute_cmd": "unmute {target}",
+      "unban_cmd": "pardon {target}",
+      "notify_cmd": "tell {target} [модерация] {reason}"
+    },
+    "_плейсхолдеры": "{target} ник/UID в игре · {duration}=30m/1h30m/7d · {minutes} {seconds} · {nick} {id} из Discord · {reason}. *_perm_cmd — для срока perm (без них плагин получит tempban 0)."
+  },
+  "warn_thresholds": [
+    {
+      "warns": 3,
+      "action": "mute",
+      "duration": "1h"
+    },
+    {
+      "warns": 5,
+      "action": "mute",
+      "duration": "24h"
+    },
+    {
+      "warns": 8,
+      "action": "ban",
+      "duration": "3d"
+    }
+  ],
+  "feedback_hint": "Не согласны с наказанием — обсудите его в канале обратной связи или заведите тикет.",
+  "gamefeed": {
+    "enabled": false,
+    "source": "log",
+    "log_file": "/server/logs/latest.log",
+    "poll_cmd": "banlist",
+    "poll_action": "ban",
+    "interval_s": 5,
+    "patterns": null
+  }
+}

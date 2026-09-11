@@ -1,0 +1,36 @@
+"""Template for a new game driver. Copy to `drivers/<yourgame>.py` and implement.
+
+Nothing else needs touching — `registry.discover()` imports every module in this
+folder at startup, the `@registry.register` decorator puts the driver in the
+list, and `/modsettings драйвер:<id>` starts using it for /mutegame.
+
+Config for the driver arrives as `self.config` (the `drivers.<id>` object in
+config.json), the case store as `self.db`.
+"""
+
+from __future__ import annotations
+
+# from .base import BaseDriver, DriverError, registry
+#
+#
+# @registry.register
+# class MyGameDriver(BaseDriver):
+#     id = "mygame"                      # /modsettings драйвер:mygame
+#     title = "Моя игра"                  # shown in the audit log
+#     supports_voice = True               # False -> chat-only mute
+#     idempotent_apply = True             # re-applied every minute while active
+#
+#     async def resolve(self, guild, member, identifier):
+#         \"\"\"Discord member -> in-game id. `identifier` may be None.\"\"\"
+#         saved = await self.db.get_game_link(guild.id, member.id, self.id)
+#         if saved:
+#             return saved
+#         raise DriverError("игровой ID не привязан — используйте /gamelink")
+#
+#     async def mute(self, guild, target, seconds, reason):
+#         ...                           # call the game server here
+#         return "что произошло, коротко — попадёт в канал логов"
+#
+#     async def unmute(self, guild, target):
+#         ...
+#         return "готово"

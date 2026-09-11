@@ -126,6 +126,7 @@ class Records(commands.Cog):
             f"**Драйвер игры:** `{driver_id}` — {driver.title}"
             + ("" if driver.ok else " ⚠️ не настроен"),
             f"**Активных наказаний:** {len(active)}",
+            f"**Slash-команды в Discord:** {'загружены' if getattr(self.bot, 'commands_synced', True) else 'НЕ загружены — см. лог ERROR / SETUP.md §2.3'}",
             f"**Health-эндпоинт:** {_keepalive_state(self.bot, self.bot.cfg)}",
         ]
         await inter.response.send_message("\n".join(lines), ephemeral=True)

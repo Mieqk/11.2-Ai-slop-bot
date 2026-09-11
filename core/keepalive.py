@@ -55,6 +55,9 @@ def build_app(bot) -> web.Application:
             "guilds": guilds,
             "members": users,
             "active_punishments": pending,
+            # false = Discord не принял загрузку slash-команд (бот жив, но команд в
+            # списке сервера нет — см. строки ERROR в логе и SETUP.md §2.3)
+            "slash_commands_synced": getattr(bot, "commands_synced", None),
             "uptime_s": round(time.monotonic() - STARTED),
         }
         return web.json_response(payload, status=200 if bot.is_ready() else 503)

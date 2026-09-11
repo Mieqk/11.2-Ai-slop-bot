@@ -86,7 +86,7 @@ ufw allow from 10.0.0.23 to any port 25575 proto tcp   # бот в приват�
 ```bash
 python bot.py --check                       # конфиг и все команды (токен не нужен)
 python test_offline.py                        # движок наказаний    -> 204/204
-python test_features.py                        # правила/медиа/игра  -> 177/177
+python test_features.py                        # правила/медиа/игра  -> 186/186
 MC_RCON_PASSWORD='…' python tools/mc_probe.py  # связь с игрой (если RCON включён) -> код 0
 curl -s localhost:8080/healthz                # {"status":"ok", "guilds":…}
 ```
@@ -108,6 +108,11 @@ curl -s localhost:8080/healthz                # {"status":"ok", "guilds":…}
 - супервизор внутри процесса переподключается сам (паузы 5→300 с, потолок
   900 с), поэтому systemd-`Restart=always` дублировать не обязательно; для
   systemd/Docker запускайте `python bot.py --once`, чтобы надзор был один;
+- загрузка slash-команд отделена от готовности процесса: если Discord её отверг
+  (403 — нет scope `applications.commands`, 429 — лимит на запись, 400 — структура
+  команды), бот **не падает и не перезапускается**: он поднимается, пишет точную
+  причину в ERROR и повторяет попытку в фоне (20 с, 1, 5, 15 мин, затем каждые
+  30 мин ~4 ч). Флаг виден в `GET /healthz` → `slash_commands_synced` и в `/whoami`;
 - одновременно одной БД пишущих процессов быть не должно (`sqlite` lock);
 - правка `config.json` и переменных требует рестарта процесса (конфиг читается
   на старте), настройки через slash-команды применяются сразу и хранятся в БД.

@@ -637,7 +637,103 @@ def test_voice() -> None:
     check("voice: gc не падения без created_at", voice.is_stale_room(ch(f"{voice.ROOM_PREFIX} n", members_=[], cid=710), now), None)
 
 
+
+# ------------------------------------------------- загрузка slash-команд (sync)
+async def test_sync_resilience() -> None:
+    """CommandSyncFailure не роняет старт, объясняет причину и повторяется в фоне."""
+    import logging as _logging
+
+    import discord as _d
+    from discord.app_commands import CommandSyncFailure as CSF
+
+    import bot as bot_mod
+
+    class Tree:
+        def __init__(self, fails_with=None, fail_times=99):
+            self.calls, self.fails_with, self.fail_times = 0, fails_with, fail_times
+
+        async def sync(self):
+            self.calls += 1
+            if self.fails_with and self.calls <= self.fail_times:
+                raise self.fails_with
+
+        def get_commands(self):
+            return []
+
+    def http_exc(status, code, message):
+        resp = SimpleNamespace(status=status, reason="x", request=SimpleNamespace(method="PUT", url="u"))
+        return CSF(_d.HTTPException(resp, {"code": code, "message": message}), [])
+
+    class Catch(_logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.rows = []
+
+        def emit(self, record):
+            self.rows.append((record.levelname, record.getMessage()))
+
+    class BotLike:
+        """Сруб ModBot: только методы sync-политики, без подключения к Discord."""
+        _report_sync_failure = bot_mod.ModBot._report_sync_failure
+        _sync_commands = bot_mod.ModBot._sync_commands
+        _sync_retries = bot_mod.ModBot._sync_retries
+
+        def __init__(self, tree, loop):
+            self.tree, self.loop = tree, loop
+            self.commands_synced = None
+            self._sync_task = None
+
+    def fake_loop():
+        created = []
+
+        class L:
+            def create_task(self, coro):
+                created.append(coro)
+                coro.close()          # фоновую задачу не крутим: проверяем только факт создания
+                return object()
+
+        return L(), created
+
+    cap = Catch()
+    _logging.getLogger("modbot").addHandler(cap)
+    try:
+        # 1) успех
+        loop, made = fake_loop()
+        botx = BotLike(Tree(), loop)
+        ok = await bot_mod.ModBot._sync_commands(botx)
+        check("sync: успех -> True и флаг поднят", ok is True and botx.commands_synced is True, botx.commands_synced)
+        check("sync: при успехе фона не заводим", not made, made)
+
+        # 2) 403 — старт не падает, причина объяснена, повтор ушёл в фон
+        loop, made = fake_loop()
+        botx = BotLike(Tree(http_exc(403, 50001, "Missing Access")), loop)
+        cap.rows.clear()
+        ok = await bot_mod.ModBot._sync_commands(botx)
+        joined = "\n".join(m for _, m in cap.rows)
+        check("sync: 403 не роняет процесс", ok is False, ok)
+        check("sync: флаг «не загружено»", botx.commands_synced is False, botx.commands_synced)
+        check("sync: в логе HTTP-статус", "403" in joined, joined[:120])
+        check("sync: в логе подсказка про скоуп", "applications.commands" in joined, joined[-200:])
+        check("sync: повтор поставлен в фоне", len(made) == 1, len(made))
+        check("sync: уровень ERROR, а не молчание", any(l == "ERROR" for l, _ in cap.rows), cap.rows)
+
+        # 3) фоновые повторы: получилось на второй итерации
+        loop, _ = fake_loop()
+        tree = Tree(http_exc(429, 0, "rate limited"), fail_times=1)
+        botx = BotLike(tree, loop); botx.commands_synced = False
+        delays = list(bot_mod.SYNC_RETRY_DELAYS)
+        bot_mod.SYNC_RETRY_DELAYS = (0, 0, 0, 0)     # тест не должен спать
+        try:
+            await bot_mod.ModBot._sync_retries(botx)
+        finally:
+            bot_mod.SYNC_RETRY_DELAYS = tuple(delays)
+        check("sync: фоновый повтор доходит до успеха", botx.commands_synced is True, tree.calls)
+    finally:
+        _logging.getLogger("modbot").removeHandler(cap)
+
+
 async def main() -> int:
+    await test_sync_resilience()
     test_style()
     test_pages()
     test_slug()

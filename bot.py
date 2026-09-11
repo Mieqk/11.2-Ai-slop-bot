@@ -33,6 +33,11 @@ from drivers.base import BaseDriver, registry
 
 log = logging.getLogger("modbot")
 
+log = logging.getLogger("modbot")
+
+#: паузы фоновых повторов загрузки команд (сек): сначала часто, потом редко
+SYNC_RETRY_DELAYS = (20, 60, 300, 900) + (1800,) * 8
+
 COGS = ("cogs.moderation", "cogs.warns", "cogs.records", "cogs.rules", "cogs.media",
         "cogs.voice", "cogs.gamefeed", "cogs.expiry")
 
@@ -55,12 +60,33 @@ TRANSIENT = (
 
 
 
+#: что делать при конкретной ошибке загрузки команд (Discord отвечает кодом статуса)
+SYNC_HINTS = {
+    401: "токен не принят — проверьте DISCORD_TOKEN / Reset Token в Developer Portal",
+    403: ("у приложения нет доступа: бот приглашён без scope `applications.commands` "
+          "или его роль/доступ убрали с сервера. Перепригласите по ссылке из SETUP.md §2.3"),
+    404: "неверный Application (бот удалён из Discord Developer Portal?)",
+    429: "слишком частые синхронизации (лимит на запись команд) — подождите и "
+         "не перезапускайте процесс часто",
+    400: "Discord отверг структуру команды (имена опций, длина, дубликаты) — смотри текст ошибки выше",
+}
+
+
+class _VoiceNoiseFilter(logging.Filter):
+    """Выбрасывает только «voice will NOT be supported» (PyNaCl/davey)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "voice will NOT be supported" not in record.getMessage()
+
+
 class ModBot(commands.Bot):
     def __init__(self, cfg):
         intents = discord.Intents.default()
         intents.members = True  # timeout/deafen state must stay correct across reconnects
         super().__init__(
-            command_prefix=commands.when_mentioned_or("!"),
+            # только slash-команды: !префикс не реализован, а он ещё и выводит
+            # предупреждение про message_content (см. discord/ext/commands/bot.py)
+            command_prefix=commands.when_mentioned,
             intents=intents,
             help_command=None,
             case_insensitive=True,
@@ -71,6 +97,57 @@ class ModBot(commands.Bot):
         self.mod = Moderation(self, cfg)
         self.rules = RulesRepo(self.db)
         self.http_keepalive = None
+        # False, пока Discord не принял загрузку команд (см. _sync_commands)
+        self.commands_synced = False
+        self._sync_task = None
+
+    async def _sync_commands(self) -> bool:
+        """Загрузить slash-команды и НЕ ронять старт из-за отказа.
+
+        Глобальная синхронизация имеет жёсткий лимит на запись, а Discord может
+        ответить 403 (нет доступа у скоупа) или 429. Пускать из-за этого процесс
+        и перезапускаться — значит только ухудшать (каждый старт = новая попытка
+        записи). Поэтому: одна попытка здесь, повторения — в фоне.
+        """
+        try:
+            await self.tree.sync()
+        except discord.app_commands.CommandSyncFailure as exc:
+            self._report_sync_failure(exc)
+        except discord.HTTPException as exc:
+            log.error("sync slash-команд не прошёл (%s): %s", getattr(exc, "status", "?"),
+                      " ".join(str(exc).split())[:300])
+        else:
+            self.commands_synced = True
+            log.info("slash-команды синхронизированы: %s",
+                     ", ".join(sorted(c.name for c in self.tree.get_commands())))
+            return True
+
+        self.commands_synced = False
+        self._sync_task = self.loop.create_task(self._sync_retries())
+        return False
+
+    def _report_sync_failure(self, exc: discord.app_commands.CommandSyncFailure) -> None:
+        status = getattr(exc, "status", 0)
+        log.error("slash-команды не загружены (попытка 1): %s", " ".join(str(exc).split())[:500])
+        hint = SYNC_HINTS.get(status)
+        log.error("→ что делать: %s", hint or "смотрите текст ошибки выше и SETUP.md §2.3")
+        if status == 403:
+            log.error("→ проще всего: выгнать бота с сервера и пригласить заново ссылкой "
+                      "со scope `bot applications.commands` (§2.3 в SETUP.md)")
+
+    async def _sync_retries(self) -> None:
+        """Фоновые повторные попытки: чинится само, как только доступ вернули."""
+        for delay in SYNC_RETRY_DELAYS:
+            await asyncio.sleep(delay)
+            try:
+                await self.tree.sync()
+            except (discord.app_commands.CommandSyncFailure, discord.HTTPException):
+                continue
+            self.commands_synced = True
+            log.info("slash-команды загружены с повторной попытки")
+            return
+        log.error("slash-команды так и не загрузились — сервер Discord отклоняет запись; "
+                  "проверьте приглашение бота (scope applications.commands) и права")
 
     async def setup_hook(self) -> None:
         await self.db.setup()
@@ -81,8 +158,7 @@ class ModBot(commands.Bot):
             except Exception:  # noqa: BLE001
                 log.exception("cog %s не загрузился", cog)
                 raise
-        await self.tree.sync()  # глобальные команды; guild= — только для серверных
-        log.info("slash-команды синхронизированы: %s", ", ".join(sorted(c.name for c in self.tree.get_commands())))
+        await self._sync_commands()  # глобальные команды; guild= — только для серверных
         self.http_keepalive = await keepalive.start(self, self.cfg)
 
 
@@ -97,6 +173,9 @@ class ModBot(commands.Bot):
         log.exception("в обработчике %s упало исключение", event_method)
 
     async def close(self) -> None:
+        if self._sync_task is not None:
+            self._sync_task.cancel()
+            self._sync_task = None
         if self.http_keepalive is not None:
             await self.http_keepalive.cleanup()
             self.http_keepalive = None
@@ -198,11 +277,12 @@ def run_forever(cfg) -> None:
                 sys.exit(f"Бот не поднялся за {max_attempts} попыток: {exc}")
             delay = next_delay(plan, attempt) + random.uniform(0, 5)
             log.warning(
-                "%s аптайм %.0fс — перезапуск через %.0fс (попытка %s): %s",
+                "%s (аптайм %.0fс) — перезапуск через %.0fс (попытка %s): %s: %s",
                 "связь потеряна" if isinstance(exc, TRANSIENT) else "ПАДЕНИЕ",
                 uptime, delay, attempt, exc.__class__.__name__,
+                " ".join(str(exc).split())[:300] or "(без сообщения)",
             )
-            log.debug("подробности перезапуска", exc_info=exc)
+            log.info("стек перезапуска (запустите с --verbose, чтобы видеть его всегда)", exc_info=exc)
             time.sleep(delay)
 
 
@@ -213,8 +293,14 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    for noisy in ("discord.http", "discord.gateway", "discord.client"):
+    # голос нами не используется, а Discord-либа на старте орёт про PyNaCl/davey —
+    # приглушаем, чтобы админ не искал проблему там, где её нет
+    for noisy in ("discord.http", "discord.gateway", "discord.client", "discord.ext.commands"):
         logging.getLogger(noisy).setLevel(logging.WARNING if not args.verbose else logging.DEBUG)
+    # голос мы не используем вовсе (бот модерирует таймаутами/RCON), а discord.py при
+    # каждом старте пишет про PyNaCl/davey — ровно эти две строки и скроем,
+    # предупреждения по теме прав/сети остаются видимыми
+    logging.getLogger("discord.client").addFilter(_VoiceNoiseFilter())
     cfg = config_loader.load(args.config, require_token=not args.check)
     if args.check:
         raise SystemExit(asyncio.run(run_check(cfg)))

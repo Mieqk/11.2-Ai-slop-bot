@@ -21,6 +21,11 @@ DEFAULTS: dict[str, Any] = {
     # ---- устойчивость соединения (бесплатный хостинг, обрывы, DNS)
     "keepalive": "auto",  # true | false | auto: поднимать /healthz на $PORT
     "keepalive_port": 8080,
+
+    # id вашего сервера: команды грузятся только в него — видны сразу, без
+    # глобального лимита и часа на распространение. Пусто = глобально.
+    # Можно и переменной окружения DISCORD_SYNC_GUILD.
+    "sync_guild_id": os.getenv("DISCORD_SYNC_GUILD", ""),
     "connect_backoff": [1, 5, 20, 60],  # попытки самого шлюза Discord
     "max_connect_retries": 20,
     "reconnect_delays": [5, 15, 30, 60, 120, 300],  # паузы супервизора, сек

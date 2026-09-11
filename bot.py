@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import random
 import sys
@@ -100,6 +101,30 @@ class ModBot(commands.Bot):
         # False, пока Discord не принял загрузку команд (см. _sync_commands)
         self.commands_synced = False
         self._sync_task = None
+        # выставляется из on_ready: нужен --diagnose, у которого нет ready-ивентов клиента
+        self.ready_signal: asyncio.Event | None = None
+        self._sync_scope = "глобально"
+
+    def _sync_target(self):
+        """Куда синхронизировать: один сервер (мгновенно) или глобально.
+
+        Для бота на одном сервере guild-sync лучше: команды видны сразу, лимит
+        записи отдельный от глобального, и нет часа на распространение.
+        """
+        raw = str(self.cfg.get("sync_guild_id") or "").strip()
+        if not raw:
+            return None
+        try:
+            guild_id = int(raw)
+        except ValueError:
+            log.warning("sync_guild_id = %r — не id сервера, синхронизирую глобально", raw)
+            return None
+        guild = self.get_guild(guild_id)
+        if guild is None:
+            log.warning("сервера %s нет среди тех, где я состою (%s) — ухожу на глобальную синхронизацию",
+                        guild_id, ", ".join(str(g.id) for g in self.guilds) or "ни одного")
+            return None
+        return discord.Object(id=guild_id)
 
     async def _sync_commands(self) -> bool:
         """Загрузить slash-команды и НЕ ронять старт из-за отказа.
@@ -109,8 +134,9 @@ class ModBot(commands.Bot):
         и перезапускаться — значит только ухудшать (каждый старт = новая попытка
         записи). Поэтому: одна попытка здесь, повторения — в фоне.
         """
+        self._sync_scope = "сервер" if self._sync_target() is not None else "глобально"
         try:
-            await self.tree.sync()
+            await self.tree.sync(guild=self._sync_target())
         except discord.app_commands.CommandSyncFailure as exc:
             self._report_sync_failure(exc)
         except discord.HTTPException as exc:
@@ -118,7 +144,7 @@ class ModBot(commands.Bot):
                       " ".join(str(exc).split())[:300])
         else:
             self.commands_synced = True
-            log.info("slash-команды синхронизированы: %s",
+            log.info("slash-команды синхронизированы (%s): %s", self._sync_scope,
                      ", ".join(sorted(c.name for c in self.tree.get_commands())))
             return True
 
@@ -140,7 +166,7 @@ class ModBot(commands.Bot):
         for delay in SYNC_RETRY_DELAYS:
             await asyncio.sleep(delay)
             try:
-                await self.tree.sync()
+                await self.tree.sync(guild=self._sync_target())
             except (discord.app_commands.CommandSyncFailure, discord.HTTPException):
                 continue
             self.commands_synced = True
@@ -164,6 +190,21 @@ class ModBot(commands.Bot):
 
     async def start(self, *args, **kwargs) -> None:
         await super().start(*args, **kwargs)
+
+    async def on_ready(self) -> None:
+        """Кто я, где я и видны ли мои команды — это и есть ответы на «почему /ban не появляется»."""
+        log.info("бот: %s (id %s) · серверов: %s · команд в дереве: %s · загружено Discord'ом: %s",
+                 self.user, self.user.id, len(self.guilds), len(self.tree.get_commands()),
+                 "да" if self.commands_synced else "НЕТ")
+        ready = getattr(self, "ready_signal", None)
+        if ready is not None:
+            ready.set()
+        if not self.guilds:
+            log.warning("бот не состоит ни в одном сервере: пригласите его ссылкой из SETUP.md §2.3 "
+                        "(scope `bot applications.commands`) — пока не увидите /ban в списке команд")
+        elif not self.commands_synced:
+            log.warning("серверов: %s, но Discord не принял команды: см. ERROR выше (обычно 403 = "
+                        "в приглашении не было scope `applications.commands`)", len(self.guilds))
 
     async def on_resume(self) -> None:
         log.info("связь с Discord восстановлена без переподключения сессии")
@@ -190,11 +231,90 @@ class ModBot(commands.Bot):
 
 
 
+
+INVITE_HINT = ("пригласите бота заново ссылкой со scope `bot applications.commands` "
+               "и permissions=1099784350740 (SETUP.md §2.3)")
+
+
+def diagnosis_lines(user, guilds, command_count: int, sync_error: Exception | None = None) -> list[str]:
+    """Что напечатает `--diagnose`: отдельная функция, чтобы это было чем покрыть.
+
+    Три разных «команд не видно»: бота нет в серверах · серверы есть, но Discord
+    отверг загрузку · всё ок (значит клиент/кэш Discord или права авторизации).
+    """
+    out = [f"бот: {user} (id {user.id})", f"команд в дереве бота: {command_count}"]
+    if not guilds:
+        out.append("серверов: 0 → бот ни в одном сервере не состоит (не приглашён или его удалили)")
+        out.append("что делать: " + INVITE_HINT)
+        return out
+    out.append(f"серверов: {len(guilds)} — " + ", ".join(g.name for g in guilds[:10]))
+    if sync_error is not None:
+        status = getattr(sync_error, "status", 0)
+        out.append(f"Discord отверг загрузку команд (HTTP {status}): "
+                   + " ".join(str(sync_error).split())[:300])
+        out.append("что делать: " + (SYNC_HINTS.get(status) or INVITE_HINT))
+        return out
+    out.append("команды приняты Discord'ом: " + str(command_count))
+    out.append("если в списке всё ещё пусто: обновите клиент (Ctrl+R / перезаход), затем "
+               "Server Settings → Integrations → этот бот: в авторизации должны быть "
+               "bot + applications.commands, и не должно быть ограничения по каналам")
+    return out
+
+
+async def diagnose(cfg) -> int:
+    """Одиночный запуск: кто я, где я, почему команд не видно. Без супервизора.
+
+    `async with bot` только вызывает setup_hook и НЕ логинит (см. Client.__aenter__),
+    поэтому заходим явно через `start reconnect=False`: иначе wait_until_ready
+    висел бы вечно.
+    """
+    print("подключение к Discord…")
+    bot = ModBot(cfg)
+    bot.ready_signal = asyncio.Event()
+
+    async def runner() -> None:
+        await bot.start(cfg["token"], reconnect=False)
+
+    task = asyncio.create_task(runner())
+    try:
+        await asyncio.wait_for(bot.ready_signal.wait(), timeout=45)
+        error: Exception | None = None
+        accepted: list = []
+        try:
+            accepted = await bot.tree.sync(guild=bot._sync_target())
+        except (discord.app_commands.CommandSyncFailure, discord.HTTPException) as exc:
+            error = exc
+        for line in diagnosis_lines(bot.user, bot.guilds, len(bot.tree.get_commands()), error):
+            print(line)
+        if accepted:
+            print(f"принято и загружено: {len(accepted)} команд(ы)")
+        return 1 if error else 0
+    except asyncio.TimeoutError:
+        # старт мог упасть раньше (неверный токен/нет сети): поднимем его причину
+        if task.done() and task.exception() is not None:
+            failure = task.exception()
+            print(f"не смог подключиться: {failure.__class__.__name__}: "
+                  + " ".join(str(failure).split())[:200])
+            if isinstance(failure, discord.LoginFailure):
+                print("что делать: токен неверный/просроченный — Reset Token в Developer Portal "
+                      "и обновите DISCORD_TOKEN")
+            return 1
+        print("не подключился за 45 с: проверьте исходящий TCP 443 до discord.com и gateway.discord.gg")
+        return 1
+    finally:
+        await bot.close()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description="Discord moderation bot")
     ap.add_argument("--config", default="config.json", help="путь к config.json")
     ap.add_argument("--check", action="store_true", help="проверить конфиг и команды, не подключаясь")
     ap.add_argument("--once", action="store_true", help="без супервизора: одно падение = выход (под systemd/docker)")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="зайти, показать кто я / на каких серверах и почему команды не видны, выйти")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -304,6 +424,8 @@ def main() -> None:
     cfg = config_loader.load(args.config, require_token=not args.check)
     if args.check:
         raise SystemExit(asyncio.run(run_check(cfg)))
+    if args.diagnose:
+        raise SystemExit(asyncio.run(diagnose(cfg)))
     if args.once:
         ModBot(cfg).run(cfg["token"], log_handler=None)
         return

@@ -18,6 +18,7 @@
   "reconnect_reset_after": 300,
   "keepalive": "auto",
   "keepalive_port": 8080,
+  "sync_guild_id": "",
   "drivers": {
     "active": "discord_voice",
     "discord_voice": {

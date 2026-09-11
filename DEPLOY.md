@@ -35,6 +35,7 @@
 | `DISCORD_TOKEN` | да | токен бота (Discord Developer Portal → Bot → Reset Token). Перекрывает `token` в `config.json`; файла с конфигом может не быть вовсе |
 | `PORT` / `WEB_PORT` | нет | если заданы, бот поднимает `GET /healthz` на этом порту (`keepalive: "auto"`) |
 | `MC_RCON_PASSWORD` | нет | только для `tools/mc_probe.py` |
+| `DISCORD_SYNC_GUILD` | нет | id сервера: грузить slash-команды только в него (мгновенно) вместо глобальной записи |
 | `TZ` | желательно | таймстемпы в карточках считаются Discord'ом, но логи удобнее в вашей зоне |
 
 ## 4. Порты и направления (главный вопрос)
@@ -86,11 +87,19 @@ ufw allow from 10.0.0.23 to any port 25575 proto tcp   # бот в приват�
 ```bash
 python bot.py --check                       # конфиг и все команды (токен не нужен)
 python test_offline.py                        # движок наказаний    -> 204/204
-python test_features.py                        # правила/медиа/игра  -> 186/186
+python test_features.py                        # правила/медиа/игра  -> 199/199
 MC_RCON_PASSWORD='…' python tools/mc_probe.py  # связь с игрой (если RCON включён) -> код 0
-curl -s localhost:8080/healthz                # {"status":"ok", "guilds":…}
+curl -s localhost:8080/healthz                # {"status":"ok", ..., "slash_commands_synced":true}
+python bot.py --diagnose                      # если «команд не видно» в Discord: покажет
 ```
 В Discord: `/whoami` → права/драйвер/канал логов зелёные; `/ping`.
+
+Если в Discord не видно слэш-команд бота (видны только чужие боты) — `python bot.py
+--diagnose`. Он честно отвечает одним из трёх: бот не состоит ни в одном сервере →
+нужно приглашение (§2.3 SETUP.md); Discord отверг загрузку команд с HTTP-кодом
+(чаще всего 403 = в приглашении не было скоупа `applications.commands` → удалить
+бота с сервера и пригласить заново); «принято N» → тогда кэш клиента (Ctrl+R) или
+ограничения авторизации приложения в Server Settings → Integrations.
 
 ## 8. Обновление / откат
 1. бэкап: `cp data/modbot.sqlite3 data/backup-$(date +%F).sqlite3` (или снапшот тома);

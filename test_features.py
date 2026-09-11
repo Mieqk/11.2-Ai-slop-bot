@@ -652,7 +652,7 @@ async def test_sync_resilience() -> None:
         def __init__(self, fails_with=None, fail_times=99):
             self.calls, self.fails_with, self.fail_times = 0, fails_with, fail_times
 
-        async def sync(self):
+        async def sync(self, *, guild=None):
             self.calls += 1
             if self.fails_with and self.calls <= self.fail_times:
                 raise self.fails_with
@@ -677,11 +677,17 @@ async def test_sync_resilience() -> None:
         _report_sync_failure = bot_mod.ModBot._report_sync_failure
         _sync_commands = bot_mod.ModBot._sync_commands
         _sync_retries = bot_mod.ModBot._sync_retries
+        _sync_target = bot_mod.ModBot._sync_target
 
         def __init__(self, tree, loop):
             self.tree, self.loop = tree, loop
             self.commands_synced = None
             self._sync_task = None
+            self.cfg = {"sync_guild_id": ""}          # глобальный sync
+            self.guilds = []
+
+        def get_guild(self, gid):
+            return None
 
     def fake_loop():
         created = []
@@ -732,7 +738,60 @@ async def test_sync_resilience() -> None:
         _logging.getLogger("modbot").removeHandler(cap)
 
 
+
+# ------------------------------------------------------- --diagnose: выводы
+def test_diagnosis_text() -> None:
+    """Что бот скажет, когда «/ban не появляется» — три разных случая."""
+    import discord as _d
+
+    import bot as bot_mod
+
+    User = SimpleNamespace(id=42, name="ModerBot")
+    Guild = SimpleNamespace(name="PIVO #1", id=7)
+
+    lines = "\n".join(bot_mod.diagnosis_lines(User, [], 30))
+    check("diagnose: 0 серверов — сказано прямо", "ни в одном сервере" in lines, lines)
+    check("diagnose: 0 серверов — дана ссылка-подсказка", "applications.commands" in lines, lines)
+    check("diagnose: 0 серверов — не вводит в заблуждение про sync", "отверг" not in lines, lines)
+
+    resp = SimpleNamespace(status=403, reason="x", request=SimpleNamespace(method="PUT", url="u"))
+    err = _d.app_commands.CommandSyncFailure(_d.HTTPException(resp, {"code": 50001, "message": "Missing Access"}), [])
+    lines = "\n".join(bot_mod.diagnosis_lines(User, [Guild], 30, err))
+    check("diagnose: 403 назван кодом статуса", "HTTP 403" in lines, lines)
+    check("diagnose: 403 даёт действие", "applications.commands" in lines and "Integrations" not in lines, lines)
+    check("diagnose: сервер по имени помянут", "PIVO #1" in lines, lines)
+
+    lines = "\n".join(bot_mod.diagnosis_lines(User, [Guild], 30))
+    check("diagnose: всё ок — подсказка про кэш клиента и Integrations",
+          "Ctrl+R" in lines and "Integrations" in lines, lines)
+    check("diagnose: всё ок — не пугает ошибкой", "отверг" not in lines, lines)
+
+
+
+# ----------------------------------------------- выбор цели синхронизации команд
+def test_sync_target() -> None:
+    """sync_guild_id: свой сервер = мгновенная видимость; иначе — глобально."""
+    import bot as bot_mod
+
+    class G:
+        def __init__(self, gid):
+            self.id, self.name = int(gid), f"server {gid}"
+
+    def target(raw, guild_ids):
+        b = SimpleNamespace(cfg={"sync_guild_id": raw}, guilds=[G(i) for i in guild_ids])
+        b.get_guild = lambda gid: next((g for g in b.guilds if g.id == int(gid)), None)
+        return bot_mod.ModBot._sync_target(b)
+
+    check("target: пусто -> глобально", target("", [7]) is None, target("", [7]))
+    check("target: свой id ->_object с ним", target("7", [7, 8]) is not None and target("7", [7, 8]).id == 7, None)
+    check("target: чужого id нет -> глобально", target("999", [7]) is None, None)
+    check("target: мусор в id -> глобально", target("не-число", [7]) is None, None)
+    check("target: бот ни в одном сервере -> глобально", target("7", []) is None, None)
+
+
 async def main() -> int:
+    test_diagnosis_text()
+    test_sync_target()
     await test_sync_resilience()
     test_style()
     test_pages()
